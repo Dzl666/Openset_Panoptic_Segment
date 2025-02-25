@@ -1,4 +1,4 @@
-import os, time, argparse
+import os, time, argparse, pickle
 from tqdm import tqdm
 import cv2 #, imageio
 import numpy as np
@@ -92,13 +92,14 @@ def main():
     to get improved performance on smaller objects, and post-processing can 
     remove stray pixels and holes.
     """
-    # we are using a 1296 * 968 image, the items in the images is usually as samll as 20 pixel per direction. So we need 65 * 48 sampling points 
+    # we are using a 1296 * 968 image, the items in the images is usually as samll as 20 pixel per direction. 
+    # So we need 65 * 48 sampling points 
     mask_generator = SAM2AutomaticMaskGenerator(
         model=sam2,
         points_per_side=128,
         points_per_batch=128,
         pred_iou_thresh=0.7,
-        stability_score_thresh=0.92,
+        stability_score_thresh=0.88,
         stability_score_offset=0.7,
         crop_n_layers=1,
         box_nms_thresh=0.7,
@@ -108,13 +109,23 @@ def main():
     )
 
     # masks = []
+    load_from_pkl = False
+    
     for idx in tqdm(range(1)):
         
         rgb_file = os.path.join(rgb_path, file_names[idx])
         rgb = cv2.imread(rgb_file)
         rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
-        mask_dict = mask_generator.generate(rgb)
+        if not load_from_pkl:
+            with torch.no_grad():
+                mask_dict = mask_generator.generate(rgb)
+            with open("mask_dict.pkl", "wb") as f:
+                pickle.dump(mask_dict, f)
+        else:
+            with open("mask_dict.pkl", "rb") as f:
+                mask_dict = pickle.load(f)
+
         print("Total candidates: ", len(mask_dict))
         show_anns(mask_dict, rgb, f'mask_{idx}')
 
@@ -122,7 +133,7 @@ def main():
         print(mask_dict[0]['point_coords'])
         print(mask_dict[0]['crop_box'])
 
-    print(f"Max GPU memory usage: {torch.cuda.max_memory_allocated() / (1024 ** 3)} GB")
+    print(f"Max GPU memory usage: {torch.cuda.max_memory_allocated() / (1024 ** 3):.4f} GB")
 
 
 
