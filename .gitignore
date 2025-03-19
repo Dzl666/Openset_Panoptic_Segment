@@ -1,3 +1,9 @@
 
 
 checkpoints
+results
+
+*.pyc
+__pycache__
+
+unzip.py

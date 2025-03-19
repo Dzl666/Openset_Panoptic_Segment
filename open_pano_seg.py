@@ -1,19 +1,29 @@
-import os, time, argparse, pickle
+import os, time, argparse, logging, pickle
 from tqdm import tqdm
 import cv2 #, imageio
+from PIL import Image
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 
+# external libs
+# segmentation
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+# image embedding
+import clip
+
+
+FORMAT = '%(asctime)s.%(msecs)06d %(levelname)-8s: [%(filename)s] %(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT, datefmt='%H:%M:%S')
 
 if torch.cuda.is_available():
-    device = torch.device("cuda")
+    DEVICE = torch.device("cuda")
 else:
-    device = torch.device("cpu")
+    DEVICE = torch.device("cpu")
 
-if device.type == "cuda":
+if DEVICE.type == "cuda":
     # use bfloat16
     torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
@@ -22,16 +32,16 @@ if device.type == "cuda":
         torch.backends.cudnn.allow_tf32 = True
 
 
-def show_anns(anns, rgb, figure_name='mask_map', borders=False):
-    if len(anns) == 0:
-        return
-    anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
+def show_anns(anns, rgb, save_path='./mask_map.png', borders=True):
     
     color_mask = np.ones((rgb.shape[0], rgb.shape[1], 4))
     color_mask[:, :, 3] = 0 # set all color mask to 0 alpha
     
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
+    fig = plt.figure(figsize=(12, 6))
+    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
+
+    ax = fig.add_subplot(121)
+    ax.axis('off')
     ax.imshow(rgb)
 
     for ann in anns:
@@ -40,8 +50,8 @@ def show_anns(anns, rgb, figure_name='mask_map', borders=False):
 
         sample_pt = ann['point_coords']
         score = ann['predicted_iou']
-
-        ax.text(sample_pt[0][0], sample_pt[0][1], f'{score:.3f}')
+        bbox = ann['bbox']
+        # ax.text(bbox[0]+bbox[2]/2, bbox[1]+bbox[3]/2, f'{score:.3f}')
 
         if borders:
             contours, _ = cv2.findContours(mask_area.astype(np.uint8), 
@@ -53,36 +63,29 @@ def show_anns(anns, rgb, figure_name='mask_map', borders=False):
 
     ax.imshow(color_mask)
 
-    plt.savefig(f"{figure_name}.png")
+    ax = fig.add_subplot(122)
+    ax.imshow(rgb)
+    ax.axis('off')
+
+    plt.savefig(save_path)
     plt.close()
-    return
+
     
-# srun --time=0:10:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:8g --pty bash
-# module load stack/2024-06 && module load gcc/12.2.0 python/3.10.13 cuda/12.1.1 cudnn/8.9.7.29-12 cmake/3.27.7 eth_proxy
-# source sam-env/bin/activate && cd Openset_Panoptic_Segment
 
-def main():
-    np.random.seed(3)
-    print(f"using device: {device}")
 
-    seq_name = 'scene0000_00'
-    data_dir = '/cluster/scratch/dengzi/scannet'
 
-    rgb_path = os.path.join(data_dir, seq_name, 'color')
-
-    # file_names = sorted(os.listdir(rgb_path))
-    file_names = os.listdir(rgb_path)
-    num_frame = len(file_names)
-
+def create_segmentor(
+        model_name='sam2.1_hiera_large.pt', 
+        cfg_name='sam2.1_hiera_l.yaml', 
+        points_per_side=32):
+    logging.info("Loading the segmentation model...")
     # The path is relative to the sam2 package
-    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    model_cfg = f"configs/sam2.1/{cfg_name}"
     # This path is related to this code's location
-    sam2_checkpoint = "/cluster/home/dengzi/sam2/checkpoints/sam2.1_hiera_large.pt"
-
-    print("Loading the model...")
+    sam2_checkpoint = f"/home/zdeng/sam2/checkpoints/{model_name}"
     sam2 = build_sam2(
         model_cfg, sam2_checkpoint, 
-        device=device, apply_postprocessing=False
+        device=DEVICE, apply_postprocessing=False
     )
     """
     There are several tunable parameters in automatic mask generation that 
@@ -96,10 +99,10 @@ def main():
     # So we need 65 * 48 sampling points 
     mask_generator = SAM2AutomaticMaskGenerator(
         model=sam2,
-        points_per_side=128,
-        points_per_batch=128,
+        points_per_side=points_per_side,
+        points_per_batch=256,
         pred_iou_thresh=0.7,
-        stability_score_thresh=0.88,
+        stability_score_thresh=0.9,
         stability_score_offset=0.7,
         crop_n_layers=1,
         box_nms_thresh=0.7,
@@ -107,34 +110,213 @@ def main():
         min_mask_region_area=100.0,
         use_m2m=True,
     )
+    return mask_generator
+
+def create_feature_extractor(model_name='ViT-B/32'):
+    """
+    - model_name: choose from ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 
+        'ViT-B/32', 'ViT-B/16', 'ViT-L/14', 'ViT-L/14@336px']
+    """
+    logging.info("Loading the CLIP model...")
+    model, preprocess = clip.load(model_name, device=DEVICE)
+
+    return model, preprocess
+
+
+# srun --time=0:10:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:8g --pty bash
+# module load stack/2024-06 && module load gcc/12.2.0 python/3.10.13 cuda/12.1.1 cudnn/8.9.7.29-12 cmake/3.27.7 eth_proxy
+# source sam-env/bin/activate && cd Openset_Panoptic_Segment
+
+def main():
+    np.random.seed(3)
+    print(f"using device: {DEVICE}")
+
+    seq_name = 'scene0001_00'
+    data_dir = '/scratch/zdeng/datasets/scannet'
+    result_dir = os.path.join('results', seq_name)
+    os.makedirs(os.path.join(result_dir, 'anns'), exist_ok=True)
+    os.makedirs(os.path.join(result_dir, 'open_seg_results'), exist_ok=True)
+
+    # image is 1296 * 968
+    rgb_path = os.path.join(data_dir, seq_name, 'color')
+
+    file_names = os.listdir(rgb_path)
+    # strip the extensions and sort by the numeric part of the file names
+    file_names = sorted(file_names, key=lambda x: int(x.split('.')[0]))
+    num_frame = len(file_names)
+    step = 5
+    num_frame = 40 * step
+
+    clip_model, prep_clip = create_feature_extractor()
+    # clip_prompt_cands = [
+    #     'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
+    #     'window', 'bookshelf', 'picture', 'counter', 'desk', 'curtain', 
+    #     'pillow', 'refridgerator', 'television', 'shower curtain', 
+    #     'person', 'nightstand', 'toilet', 'sink', 'lamp', 'bathtub', 
+    #     'bag',  'otherfurniture', 
+    #     'wall', 'floor', 'blinds', 'shelves', 'dresser', 'mirror', 
+    #     'floor mat', 'clothes', 'ceiling', 'books', 'paper', 'towel', 
+    #     'box', 'whiteboard', 'otherstructure', 'otherprop'
+    # ]
+    # text_cands = clip.tokenize(clip_prompt_cands).to(DEVICE)
+    # with torch.no_grad():
+    #     text_features = clip_model.encode_text(text_cands)
+
+    num_sam_samples = 32
+    clip_pca_dim = 128
 
     # masks = []
     load_from_pkl = False
+    if not load_from_pkl:
+        segmentor:SAM2AutomaticMaskGenerator = create_segmentor(
+            points_per_side=num_sam_samples
+        )
     
-    for idx in tqdm(range(1)):
+    for idx in tqdm(range(0, num_frame, step)):
+        logging.info(f"Processing frame: {file_names[idx]}")
         
         rgb_file = os.path.join(rgb_path, file_names[idx])
         rgb = cv2.imread(rgb_file)
         rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
 
-        if not load_from_pkl:
-            with torch.no_grad():
-                mask_dict = mask_generator.generate(rgb)
-            with open("mask_dict.pkl", "wb") as f:
-                pickle.dump(mask_dict, f)
-        else:
-            with open("mask_dict.pkl", "rb") as f:
+        # ========================= SAM =========================
+        if load_from_pkl:
+            with open(f"{result_dir}/mask_dict.pkl", "rb") as f:
                 mask_dict = pickle.load(f)
+        else:
+            with torch.no_grad():
+                mask_dict = segmentor.generate(rgb)
+            if len(mask_dict) == 0:
+                logging.warning("No mask is segmented by sam2, skipping..")
+                continue
 
-        print("Total candidates: ", len(mask_dict))
-        show_anns(mask_dict, rgb, f'mask_{idx}')
+            mask_dict = sorted(mask_dict, key=(lambda x: x['area']), reverse=True)
 
-        print(mask_dict[0]['bbox'])
-        print(mask_dict[0]['point_coords'])
-        print(mask_dict[0]['crop_box'])
+            # store it into files
+            with open(f"{result_dir}/{idx}_mask_{num_sam_samples}samples.pkl", "wb") as f:
+                pickle.dump(mask_dict, f)
+            show_anns(mask_dict, rgb, f"{result_dir}/anns/{idx}_{num_sam_samples}samples.png")
+
+        logging.info(f"Total candidates: {len(mask_dict)}")
+        # =======================================================
+        
+
+        # fig = plt.figure(figsize=(20, 10))
+        # plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
+        # ax = fig.add_subplot(121)
+        # ax.imshow(rgb)
+        # color_mask = np.ones((rgb.shape[0], rgb.shape[1], 4))
+        # color_mask[:, :, 3] = 0 # set all color mask to 0 alpha
+
+        # ========================= CLIP =========================
+        # method 1 global context
+        # with torch.no_grad():
+        #     image_feat_global = clip_model.encode_image(
+        #         prep_clip(Image.fromarray(rgb)).unsqueeze(0).to(DEVICE))
+        # # print("CLIP feat dim: ", image_feat_global.shape)
+        # image_feat_global = image_feat_global.detach().cpu().to(torch.float32).numpy()
+        # # pca_feats = PCA(n_components=clip_pca_dim).fit_transform(image_feat_global)
+        # # feat_min = np.min(pca_feats, axis=0, keepdims=True)
+        # # feat_max = np.max(pca_feats, axis=0, keepdims=True)
+        # # image_feat_global = (pca_feats - feat_min) / (feat_max - feat_min)
+
+        # method 2 patch context
+        all_feats = []
+        patch_num = (4, 4)
+        # cut the rgb into N*M equal parts and get the range and the cores patch as a dict
+        patch_dict = {}
+        for i in range(patch_num[0]):
+            for j in range(patch_num[1]):
+                x1, x2 = i * rgb.shape[1] // patch_num[0], (i+1) * rgb.shape[1] // patch_num[0]
+                y1, y2 = j * rgb.shape[0] // patch_num[1], (j+1) * rgb.shape[0] // patch_num[1]
+
+                patch_info = {}
+                patch_info['range'] = [x1, y1, x2, y2]
+
+                with torch.no_grad():
+                    image_feat_patch = clip_model.encode_image(
+                        prep_clip(Image.fromarray(rgb[y1:y2, x1:x2])).unsqueeze(0).to(DEVICE))
+                image_feat_patch = image_feat_patch.detach().cpu().to(torch.float32).numpy()
+                patch_info['feat'] = image_feat_patch
+
+                patch_dict[(i, j)] = patch_info
+
+        # all_feats = torch.cat(all_feats, dim=0).detach().cpu().to(torch.float32).numpy()
+        # pca_feats = PCA(n_components=clip_pca_dim).fit_transform(all_feats)
+        # feat_min = np.min(pca_feats, axis=0, keepdims=True)
+        # feat_max = np.max(pca_feats, axis=0, keepdims=True)
+        # pca_feats = (pca_feats - feat_min) / (feat_max - feat_min)
+
+        # for key, patch_info in patch_dict.items():
+        #     patch_dict[key]['feat'] = pca_feats[key[0]*patch_num[1]+key[1]]
+
+        # =======================================================
+
+        seg_dict = {}
+        seg_meta_info = {}
+        seg_map = np.zeros(rgb.shape[:2], dtype=np.uint8)
+
+        for inst_id, ann in enumerate(mask_dict):
+            inst_info = {}
+            bbox_seg = ann['bbox'] # XYWH format
+            x1, x2 = int(bbox_seg[0]), int(bbox_seg[0]+bbox_seg[2])
+            y1, y2 = int(bbox_seg[1]), int(bbox_seg[1]+bbox_seg[3])
+            inst_info['bbox'] = [x1, y1, x2, y2]
+            # cropped_rgb = rgb[y1:y2, x1:x2]
+
+            mask_area = ann['segmentation']
+            inst_info['area'] = np.count_nonzero(mask_area)
+            seg_map[mask_area] = inst_id + 1
+            # color_mask[mask_area] = np.concatenate([np.random.random(3), [0.5]])
+
+            inst_info['score_iou'] = ann['predicted_iou']
+
+            # for the global context, just assign to all segs
+            # inst_info['sem_feat'] = image_feat_global
+
+            # for the patch context, find the patch with largest overlap
+            max_overlap = 0
+            clip_feat = None
+            for key, patch_info in patch_dict.items():
+                x1, y1, x2, y2 = patch_info['range']
+                overlap = np.count_nonzero(mask_area[y1:y2, x1:x2])
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    clip_feat = patch_info['feat']
+            inst_info['sem_feat'] = clip_feat
+
+
+            # cropped_rgb = prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE)
+            # with torch.no_grad():
+            #     # original size is 512
+            #     # image_feat = clip_model.encode_image(cropped_rgb)
+            #     logits_per_image, logits_per_text = clip_model(cropped_rgb, text_cands)
+            #     probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+            #     class_id = np.argmax(probs)
+            
+            # print(image_feat.shape)
+            # seg_dict["clip_feat"] = image_feat
+
+            # bbox = ann['bbox']
+            # ax.text(bbox[0]+bbox[2]/2, bbox[1]+bbox[3]/2, f'{clip_prompt_cands[class_id]}')
+
+            seg_meta_info[inst_id+1] = inst_info
+
+        # ax.imshow(color_mask)
+        # ax = fig.add_subplot(122)
+        # ax.imshow(rgb)
+        # plt.savefig(f"{result_dir}/anns/{idx}_clip.png")
+        # plt.close()
+
+        seg_dict['seg_map'] = seg_map
+        seg_dict['meta_info'] = seg_meta_info
+        with open(os.path.join(result_dir, 'open_seg_results', str(idx).zfill(5)+'.pkl'), "wb") as f:
+            pickle.dump(seg_dict, f)
+
+        torch.cuda.empty_cache()
+
 
     print(f"Max GPU memory usage: {torch.cuda.max_memory_allocated() / (1024 ** 3):.4f} GB")
-
 
 
 
