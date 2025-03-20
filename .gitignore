@@ -2,6 +2,7 @@
 
 checkpoints
 results
+logs
 
 *.pyc
 __pycache__

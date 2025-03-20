@@ -5,7 +5,7 @@ from PIL import Image
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
+# from sklearn.decomposition import PCA
 
 # external libs
 # segmentation
@@ -123,16 +123,19 @@ def create_feature_extractor(model_name='ViT-B/32'):
     return model, preprocess
 
 
-# srun --time=0:10:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:8g --pty bash
+# srun --time=0:5:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:10g --pty bash
 # module load stack/2024-06 && module load gcc/12.2.0 python/3.10.13 cuda/12.1.1 cudnn/8.9.7.29-12 cmake/3.27.7 eth_proxy
 # source sam-env/bin/activate && cd Openset_Panoptic_Segment
+
+# sbatch --time=0:5:00 -n 2 --mem-per-cpu=4g --gpus=1 --gres=gpumem:16g --output="logs/running.log" --wrap="python open_pano_seg.py"
 
 def main():
     np.random.seed(3)
     print(f"using device: {DEVICE}")
 
     seq_name = 'scene0001_00'
-    data_dir = '/scratch/zdeng/datasets/scannet'
+    # data_dir = '/scratch/zdeng/datasets/scannet'
+    data_dir = '/cluster/scratch/dengzi/scannet'
     result_dir = os.path.join('results', seq_name)
     os.makedirs(os.path.join(result_dir, 'anns'), exist_ok=True)
     os.makedirs(os.path.join(result_dir, 'open_seg_results'), exist_ok=True)
@@ -145,7 +148,7 @@ def main():
     file_names = sorted(file_names, key=lambda x: int(x.split('.')[0]))
     num_frame = len(file_names)
     step = 5
-    num_frame = 40 * step
+    num_frame = 100 * step
 
     clip_model, prep_clip = create_feature_extractor()
     # clip_prompt_cands = [
@@ -163,7 +166,7 @@ def main():
     #     text_features = clip_model.encode_text(text_cands)
 
     num_sam_samples = 32
-    clip_pca_dim = 128
+    # clip_pca_dim = 128
 
     # masks = []
     load_from_pkl = False
@@ -222,24 +225,23 @@ def main():
 
         # method 2 patch context
         all_feats = []
-        patch_num = (4, 4)
         # cut the rgb into N*M equal parts and get the range and the cores patch as a dict
+        patch_num = (8, 6) # num_W, num_H
+        patch_size = (rgb.shape[1] // patch_num[0], rgb.shape[0] // patch_num[1])
         patch_dict = {}
         for i in range(patch_num[0]):
             for j in range(patch_num[1]):
-                x1, x2 = i * rgb.shape[1] // patch_num[0], (i+1) * rgb.shape[1] // patch_num[0]
-                y1, y2 = j * rgb.shape[0] // patch_num[1], (j+1) * rgb.shape[0] // patch_num[1]
-
-                patch_info = {}
-                patch_info['range'] = [x1, y1, x2, y2]
-
+                x1, x2 = i * patch_size[0], (i+1) * patch_size[0]
+                y1, y2 = j * patch_size[1], (j+1) * patch_size[1]
                 with torch.no_grad():
                     image_feat_patch = clip_model.encode_image(
                         prep_clip(Image.fromarray(rgb[y1:y2, x1:x2])).unsqueeze(0).to(DEVICE))
                 image_feat_patch = image_feat_patch.detach().cpu().to(torch.float32).numpy()
-                patch_info['feat'] = image_feat_patch
 
-                patch_dict[(i, j)] = patch_info
+                patch_dict[(i, j)] = {
+                    'range': [x1, y1, x2, y2],
+                    'feat': image_feat_patch
+                }
 
         # all_feats = torch.cat(all_feats, dim=0).detach().cpu().to(torch.float32).numpy()
         # pca_feats = PCA(n_components=clip_pca_dim).fit_transform(all_feats)
@@ -315,9 +317,7 @@ def main():
 
         torch.cuda.empty_cache()
 
-
     print(f"Max GPU memory usage: {torch.cuda.max_memory_allocated() / (1024 ** 3):.4f} GB")
-
 
 
 if __name__ == '__main__':
