@@ -14,62 +14,22 @@ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 # image embedding
 import clip
 
+# self packages
+from utils import *
+
 
 FORMAT = '%(asctime)s.%(msecs)06d %(levelname)-8s: [%(filename)s] %(message)s'
 logging.basicConfig(level=logging.INFO, format=FORMAT, datefmt='%H:%M:%S')
 
-if torch.cuda.is_available():
-    DEVICE = torch.device("cuda")
-else:
-    DEVICE = torch.device("cpu")
-
-if DEVICE.type == "cuda":
+torch.cuda.set_device(7)
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+if DEVICE == 'cuda':
     # use bfloat16
     torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
     if torch.cuda.get_device_properties(0).major >= 8:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-
-
-def show_anns(anns, rgb, save_path='./mask_map.png', borders=True):
-    
-    color_mask = np.ones((rgb.shape[0], rgb.shape[1], 4))
-    color_mask[:, :, 3] = 0 # set all color mask to 0 alpha
-    
-    fig = plt.figure(figsize=(12, 6))
-    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
-
-    ax = fig.add_subplot(121)
-    ax.axis('off')
-    ax.imshow(rgb)
-
-    for ann in anns:
-        mask_area = ann['segmentation']
-        color_mask[mask_area] = np.concatenate([np.random.random(3), [0.7]])
-
-        sample_pt = ann['point_coords']
-        score = ann['predicted_iou']
-        bbox = ann['bbox']
-        # ax.text(bbox[0]+bbox[2]/2, bbox[1]+bbox[3]/2, f'{score:.3f}')
-
-        if borders:
-            contours, _ = cv2.findContours(mask_area.astype(np.uint8), 
-                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
-            # Try to smooth contours
-            contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) \
-                for contour in contours]
-            cv2.drawContours(color_mask, contours, -1, (0, 0, 1, 0.4), thickness=1) 
-
-    ax.imshow(color_mask)
-
-    ax = fig.add_subplot(122)
-    ax.imshow(rgb)
-    ax.axis('off')
-
-    plt.savefig(save_path)
-    plt.close()
-
     
 
 
@@ -88,12 +48,9 @@ def create_segmentor(
         device=DEVICE, apply_postprocessing=False
     )
     """
-    There are several tunable parameters in automatic mask generation that 
-    control how densely points are sampled and what the thresholds are for 
-    removing low quality or duplicate masks. 
-    Additionally, generation can be automatically run on crops of the image 
-    to get improved performance on smaller objects, and post-processing can 
-    remove stray pixels and holes.
+    Control how densely points are sampled and what the thresholds are for removing low quality or duplicate masks. 
+    Generation can be automatically run on crops of the image 
+    to get improved performance on smaller objects, and post-processing can remove stray pixels and holes.
     """
     # we are using a 1296 * 968 image, the items in the images is usually as samll as 20 pixel per direction. 
     # So we need 65 * 48 sampling points 
@@ -112,15 +69,6 @@ def create_segmentor(
     )
     return mask_generator
 
-def create_feature_extractor(model_name='ViT-B/32'):
-    """
-    - model_name: choose from ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 
-        'ViT-B/32', 'ViT-B/16', 'ViT-L/14', 'ViT-L/14@336px']
-    """
-    logging.info("Loading the CLIP model...")
-    model, preprocess = clip.load(model_name, device=DEVICE)
-
-    return model, preprocess
 
 
 # srun --time=0:5:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:10g --pty bash
@@ -150,7 +98,7 @@ def main():
     step = 5
     num_frame = 100 * step
 
-    clip_model, prep_clip = create_feature_extractor()
+    clip_model, prep_clip = create_feature_extractor(device=DEVICE)
     # clip_prompt_cands = [
     #     'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
     #     'window', 'bookshelf', 'picture', 'counter', 'desk', 'curtain', 
@@ -218,10 +166,7 @@ def main():
         #         prep_clip(Image.fromarray(rgb)).unsqueeze(0).to(DEVICE))
         # # print("CLIP feat dim: ", image_feat_global.shape)
         # image_feat_global = image_feat_global.detach().cpu().to(torch.float32).numpy()
-        # # pca_feats = PCA(n_components=clip_pca_dim).fit_transform(image_feat_global)
-        # # feat_min = np.min(pca_feats, axis=0, keepdims=True)
-        # # feat_max = np.max(pca_feats, axis=0, keepdims=True)
-        # # image_feat_global = (pca_feats - feat_min) / (feat_max - feat_min)
+
 
         # method 2 patch context
         all_feats = []
@@ -242,15 +187,6 @@ def main():
                     'range': [x1, y1, x2, y2],
                     'feat': image_feat_patch
                 }
-
-        # all_feats = torch.cat(all_feats, dim=0).detach().cpu().to(torch.float32).numpy()
-        # pca_feats = PCA(n_components=clip_pca_dim).fit_transform(all_feats)
-        # feat_min = np.min(pca_feats, axis=0, keepdims=True)
-        # feat_max = np.max(pca_feats, axis=0, keepdims=True)
-        # pca_feats = (pca_feats - feat_min) / (feat_max - feat_min)
-
-        # for key, patch_info in patch_dict.items():
-        #     patch_dict[key]['feat'] = pca_feats[key[0]*patch_num[1]+key[1]]
 
         # =======================================================
 
@@ -312,7 +248,8 @@ def main():
 
         seg_dict['seg_map'] = seg_map
         seg_dict['meta_info'] = seg_meta_info
-        with open(os.path.join(result_dir, 'open_seg_results', str(idx).zfill(5)+'.pkl'), "wb") as f:
+        save_pkl_path = os.path.join(result_dir, 'open_seg_results', str(idx).zfill(5)+'.pkl')
+        with open(save_pkl_path, "wb") as f:
             pickle.dump(seg_dict, f)
 
         torch.cuda.empty_cache()
