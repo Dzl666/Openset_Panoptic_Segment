@@ -1,10 +1,8 @@
 
-
 checkpoints
 results
+outputs
 logs
 
 *.pyc
 __pycache__
-
-unzip.py

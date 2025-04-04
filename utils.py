@@ -43,6 +43,22 @@ def L1_sim(a, b):
     return -l1_sim
 
 
+def get_new_pallete(num_colors):
+    """Generate a color pallete given the number of colors needed. First color is always black."""
+    pallete = []
+    for j in range(num_colors):
+        lab = j
+        r, g, b = 0, 0, 0
+        i = 0
+        while lab > 0:
+            r |= ((lab >> 0) & 1) << (7 - i)
+            g |= ((lab >> 1) & 1) << (7 - i)
+            b |= ((lab >> 2) & 1) << (7 - i)
+            i = i + 1
+            lab >>= 3
+        pallete.append([r, g, b])
+    return torch.tensor(pallete).float() / 255.0
+
 
 def show_anns(anns, rgb, save_path='./mask_map.png', borders=True):
     

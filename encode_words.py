@@ -40,12 +40,10 @@ def main():
     clip_text_cands = [
         'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
         'window', 'bookshelf', 'picture', 'desk', 'curtain', 
-        'pillow', 'nightstand', 'toilet', 'sink', 'lamp'
+        'pillow', 'nightstand', 'toilet', 'sink', 'lamp', 
         'wall', 'floor', 'blinds', 'shelves', 'dresser', 'mirror', 
         'floor mat', 'clothes', 'ceiling', 'books', 'paper', 'towel', 
         'box', 'whiteboard',
-        'chair leg', 'table leg', 'chair arm', 'sofa arm', 'sofa back', 
-        'chairleg', 'tableleg', 'chairarm', 'sofaarm', 'sofaback', 
         'chair_leg', 'table_leg', 'chair_arm', 'sofa_arm', 'sofa_back', 
     ]
 
