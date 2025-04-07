@@ -15,6 +15,8 @@ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 # image embedding
 import clip
 
+from transformers import AutoProcessor, AutoModel, AutoTokenizer
+
 # self packages
 from utils import *
 
@@ -53,8 +55,6 @@ def create_segmentor(
     Generation can be automatically run on crops of the image 
     to get improved performance on smaller objects, and post-processing can remove stray pixels and holes.
     """
-    # we are using a 1296 * 968 image, the items in the images is usually as samll as 20 pixel per direction. 
-    # So we need 65 * 48 sampling points 
     mask_generator = SAM2AutomaticMaskGenerator(
         model=sam2,
         points_per_side=points_per_side,
@@ -101,23 +101,31 @@ def main():
 
 
     
-    patch_num = (8, 6) # num_W, num_H
-    division_method = 'patch'
+    patch_num = (4, 4) # num_W, num_H
+    division_method = 'seg' # 'patch' or 'seg'
     sim_metric = 'cos'
 
-    exp_name = 'patch8-6'
+    exp_name = f'seg_siglip2'
     result_dir = pjoin('results', seq_name)
     os.makedirs(pjoin(result_dir, 'sam_vis'), exist_ok=True)
     os.makedirs(pjoin(result_dir, 'sam_temp_res'), exist_ok=True)
-    os.makedirs(pjoin(result_dir, 'clip_vis'), exist_ok=True)
-    os.makedirs(pjoin(result_dir, f'open_seg_{exp_name}'), exist_ok=True)
+    os.makedirs(pjoin(result_dir, 'clip_vis', exp_name), exist_ok=True)
+    os.makedirs(pjoin(result_dir, f'openseg_{exp_name}'), exist_ok=True)
 
     
     
-    # clip_dim = 512 # for ViT-B/32
-    clip_dim = 768 # for ViT-L/14
-    clip_model, prep_clip = create_feature_extractor('ViT-L/14', device=DEVICE)
-    clip_text_cands = [
+    # # clip_dim = 512 # for ViT-B/32
+    # clip_dim = 768 # for ViT-L/14
+    # clip_model, prep_clip = create_feature_extractor('ViT-L/14', device=DEVICE)
+
+    # siglip_model_name = "google/siglip2-base-patch16-224"
+    siglip_model_name = "google/siglip2-so400m-patch14-384"
+    siglip_model_path = '/scratch/zdeng/checkpoints/models--google--siglip2-so400m-patch14-384/snapshots/e8e487298228002f3d8a82e0cd5c8ea9c567f57f/'
+    siglip_model = AutoModel.from_pretrained(siglip_model_path).to(DEVICE)
+    tokenizer = AutoTokenizer.from_pretrained(siglip_model_path)
+    processor = AutoProcessor.from_pretrained(siglip_model_path)
+
+    text_cands = [
         'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
         'window', 'bookshelf', 'picture', 'desk', 'curtain', 
         'pillow', 'nightstand', 'toilet', 'sink', 'lamp', 
@@ -126,15 +134,25 @@ def main():
         'box', 'whiteboard',
         'chair_leg', 'table_leg', 'chair_arm', 'sofa_arm', 'sofa_back', 
     ]
-    text_cands = clip.tokenize(clip_text_cands).to(DEVICE)
+    # text_cands = clip.tokenize(text_cands).to(DEVICE)
+    # with torch.no_grad():
+    #     text_feats = clip_model.encode_text(text_cands)
+    # text_feats = text_feats.detach().cpu().to(torch.float32).numpy()
+    text_inputs = tokenizer(text_cands, 
+        padding="max_length", max_length=64, return_tensors="pt").to(DEVICE)
     with torch.no_grad():
-        text_feats = clip_model.encode_text(text_cands)
+        text_feats = siglip_model.get_text_features(**text_inputs)
     text_feats = text_feats.detach().cpu().to(torch.float32).numpy()
 
+
+    rgb_file = pjoin(rgb_path, file_names[0])
+    rgb = cv2.imread(rgb_file)
+    H, W, _ = rgb.shape
 
     # NOTE parameters
     load_from_pkl = True
     sam_samples = 32
+    min_area = (H*W) * 0.0005
 
     # create segmentor
     if not load_from_pkl:
@@ -199,9 +217,17 @@ def main():
                 for j in range(patch_num[1]):
                     x1, x2 = i * patch_size[0], (i+1) * patch_size[0]
                     y1, y2 = j * patch_size[1], (j+1) * patch_size[1]
+                    cropped_rgb = rgb[y1:y2, x1:x2]
+
+                    # with torch.no_grad():
+                    #     image_feat_patch = clip_model.encode_image(
+                    #         prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE))
+                        
+                    img_inputs = processor(images=Image.fromarray(cropped_rgb), 
+                                            return_tensors="pt").to(DEVICE)
                     with torch.no_grad():
-                        image_feat_patch = clip_model.encode_image(
-                            prep_clip(Image.fromarray(rgb[y1:y2, x1:x2])).unsqueeze(0).to(DEVICE))
+                        image_feat_patch = siglip_model.get_image_features(**img_inputs)
+
                     image_feat_patch = image_feat_patch.detach().cpu().to(torch.float32).numpy()
 
                     img_feats.append(image_feat_patch)
@@ -217,9 +243,16 @@ def main():
                 x1, x2 = int(bbox_seg[0]), int(bbox_seg[0]+bbox_seg[2])
                 y1, y2 = int(bbox_seg[1]), int(bbox_seg[1]+bbox_seg[3])
                 cropped_rgb = rgb[y1:y2, x1:x2]
-                cropped_rgb = prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE)
+
+                # cropped_rgb = prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE)
+                # with torch.no_grad():
+                #     image_feat = clip_model.encode_image(cropped_rgb)
+
+                img_inputs = processor(images=Image.fromarray(cropped_rgb), 
+                                       return_tensors="pt").to(DEVICE)
                 with torch.no_grad():
-                    image_feat = clip_model.encode_image(cropped_rgb)
+                    image_feat = siglip_model.get_image_features(**img_inputs)
+                
                 image_feat = image_feat.detach().cpu().to(torch.float32).numpy()
                 img_feats.append(image_feat)
                 patch_dict[inst_id] = {
@@ -240,7 +273,8 @@ def main():
     # find the closest text word for each patch 
     # based on the cosine similarity
     all_feats = np.concatenate(all_feats, axis=0)
-    all_feats = all_feats.reshape(-1, clip_dim)
+    feat_dim = all_feats.shape[-1]
+    all_feats = all_feats.reshape(-1, feat_dim)
 
     # if use L1 sim, we must normalize the text feats first
     if sim_metric == 'L1':
@@ -307,9 +341,9 @@ def main():
                     seg_iter += 1
                     patch_dict[(i, j)]['text_idx'] = top3_idx[-1]
 
-                    ax.text(x1, y1*2/3 + y2/3, f'{clip_text_cands[top3_idx[-1]]}:{top3_score[-1]:.2f}', fontsize=10)
-                    ax.text(x1, y1/3 + y2*2/3, f'{clip_text_cands[top3_idx[-2]]}:{top3_score[-2]:.2f}', fontsize=10)
-                    ax.text(x1, y2, f'{clip_text_cands[top3_idx[-3]]}:{top3_score[-3]:.2f}', fontsize=10)
+                    ax.text(x1, y1*2/3 + y2/3, f'{text_cands[top3_idx[-1]]}:{top3_score[-1]:.2f}', fontsize=9, color='white')
+                    ax.text(x1, y1/3 + y2*2/3, f'{text_cands[top3_idx[-2]]}:{top3_score[-2]:.2f}', fontsize=9, color='white')
+                    ax.text(x1, y2, f'{text_cands[top3_idx[-3]]}:{top3_score[-3]:.2f}', fontsize=9, color='white')
 
 
         seg_dict = {}
@@ -347,12 +381,13 @@ def main():
                         text_idx = patch_info['text_idx']
 
             # ##### per segment context
-            # elif division_method == 'seg':
-            #     clip_feat = all_feats[seg_iter]
-            #     text_idx = all_matches[seg_iter]
-            #     seg_iter += 1
-            #     color_mask[mask_area] = np.concatenate([np.random.random(3), [0.5]])
-            #     ax.text(bbox_seg[0]+bbox_seg[2]/3, bbox_seg[1]+bbox_seg[3]/2, f'{clip_text_cands[text_idx]}')
+            elif division_method == 'seg':
+                clip_feat = all_feats[seg_iter]
+                text_idx = all_matches[seg_iter][-1]
+                best_score = all_scores[seg_iter][-1]
+                seg_iter += 1
+                color_mask[mask_area] = np.concatenate([np.random.random(3), [0.5]])
+                ax.text((x1+x2)/2, (y1+y2)/2, f'{text_cands[text_idx]}', fontsize=10, color='white')
 
 
             inst_info['sem_feat'] = clip_feat
@@ -362,7 +397,7 @@ def main():
         ax.imshow(color_mask)
         ax = fig.add_subplot(122)
         ax.imshow(rgb)
-        plt.savefig(f"{result_dir}/clip_vis/{f_idx}_{exp_name}_L1.png")
+        plt.savefig(f"{result_dir}/clip_vis/{exp_name}/{f_idx}.png")
         plt.close()
 
         seg_dict['seg_map'] = seg_map
