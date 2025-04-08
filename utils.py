@@ -6,6 +6,10 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
+# segmentation
+from sam2.build_sam import build_sam2
+from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+# feature embedder
 import clip
 
 def create_feature_extractor(model_name='ViT-B/32', device='cuda'):
@@ -17,6 +21,48 @@ def create_feature_extractor(model_name='ViT-B/32', device='cuda'):
     model, preprocess = clip.load(model_name, device=device)
 
     return model, preprocess
+
+
+def create_sam_segmentor(
+        model_name='sam2.1_hiera_large.pt',
+        cfg_name='sam2.1_hiera_l.yaml',
+        points_per_side=32,
+        min_area=100, 
+        iou_thres=0.7, 
+        post_process=False, 
+        device='cuda'
+    ):
+
+    if device == 'cuda':
+        # use bfloat16
+        torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+        # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
+        if torch.cuda.get_device_properties(0).major >= 8:
+            torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    # The path is relative to the sam2 package
+    model_cfg = f"configs/sam2.1/{cfg_name}"
+    # This path is related to this code's location
+    sam2_checkpoint = f"/home/zdeng/sam2/checkpoints/{model_name}"
+    sam2 = build_sam2(
+        model_cfg, sam2_checkpoint,
+        device=device, apply_postprocessing=post_process
+    )
+    mask_generator = SAM2AutomaticMaskGenerator(
+        model=sam2,
+        points_per_side=points_per_side,
+        points_per_batch=256,
+        pred_iou_thresh=iou_thres,
+        stability_score_thresh=0.92,
+        stability_score_offset=0.7,
+        crop_n_layers=1,
+        box_nms_thresh=0.7,
+        crop_n_points_downscale_factor=2,
+        min_mask_region_area=min_area,
+        use_m2m=True,
+    )
+    return mask_generator
 
 
 def cos_sim(a, b):

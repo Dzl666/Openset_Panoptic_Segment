@@ -1,4 +1,4 @@
-import os, time, argparse, logging, pickle
+import os, time, argparse, logging, pickle, copy
 from os.path import join as pjoin
 from tqdm import tqdm
 import cv2 #, imageio
@@ -33,14 +33,14 @@ if DEVICE == 'cuda':
     if torch.cuda.get_device_properties(0).major >= 8:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-    
-
 
 
 def create_segmentor(
         model_name='sam2.1_hiera_large.pt', 
         cfg_name='sam2.1_hiera_l.yaml', 
-        points_per_side=32):
+        points_per_side=32, 
+        min_area=150, 
+        ):
     logging.info("Loading the segmentation model...")
     # The path is relative to the sam2 package
     model_cfg = f"configs/sam2.1/{cfg_name}"
@@ -65,7 +65,7 @@ def create_segmentor(
         crop_n_layers=1,
         box_nms_thresh=0.7,
         crop_n_points_downscale_factor=2,
-        min_mask_region_area=150.0,
+        min_mask_region_area=min_area,
         use_m2m=True,
     )
     return mask_generator
@@ -98,33 +98,6 @@ def main():
     step = 5
     num_frame = 30 * step
 
-
-
-    
-    patch_num = (4, 4) # num_W, num_H
-    division_method = 'seg' # 'patch' or 'seg'
-    sim_metric = 'cos'
-
-    exp_name = f'seg_siglip2'
-    result_dir = pjoin('results', seq_name)
-    os.makedirs(pjoin(result_dir, 'sam_vis'), exist_ok=True)
-    os.makedirs(pjoin(result_dir, 'sam_temp_res'), exist_ok=True)
-    os.makedirs(pjoin(result_dir, 'clip_vis', exp_name), exist_ok=True)
-    os.makedirs(pjoin(result_dir, f'openseg_{exp_name}'), exist_ok=True)
-
-    
-    
-    # # clip_dim = 512 # for ViT-B/32
-    # clip_dim = 768 # for ViT-L/14
-    # clip_model, prep_clip = create_feature_extractor('ViT-L/14', device=DEVICE)
-
-    # siglip_model_name = "google/siglip2-base-patch16-224"
-    siglip_model_name = "google/siglip2-so400m-patch14-384"
-    siglip_model_path = '/scratch/zdeng/checkpoints/models--google--siglip2-so400m-patch14-384/snapshots/e8e487298228002f3d8a82e0cd5c8ea9c567f57f/'
-    siglip_model = AutoModel.from_pretrained(siglip_model_path).to(DEVICE)
-    tokenizer = AutoTokenizer.from_pretrained(siglip_model_path)
-    processor = AutoProcessor.from_pretrained(siglip_model_path)
-
     text_cands = [
         'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
         'window', 'bookshelf', 'picture', 'desk', 'curtain', 
@@ -134,14 +107,43 @@ def main():
         'box', 'whiteboard',
         'chair_leg', 'table_leg', 'chair_arm', 'sofa_arm', 'sofa_back', 
     ]
-    # text_cands = clip.tokenize(text_cands).to(DEVICE)
-    # with torch.no_grad():
-    #     text_feats = clip_model.encode_text(text_cands)
-    # text_feats = text_feats.detach().cpu().to(torch.float32).numpy()
-    text_inputs = tokenizer(text_cands, 
-        padding="max_length", max_length=64, return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
-        text_feats = siglip_model.get_text_features(**text_inputs)
+
+    
+    patch_num = (4, 4) # num_W, num_H
+    division_method = 'seg' # 'patch' or 'seg'
+    sim_metric = 'cos'
+    encoder = 'clip' # 'clip' or 'siglip'
+
+    exp_name = f'seg_{encoder}'
+    result_dir = pjoin('results', seq_name)
+    os.makedirs(pjoin(result_dir, 'sam_vis'), exist_ok=True)
+    os.makedirs(pjoin(result_dir, 'sam_temp_res'), exist_ok=True)
+    os.makedirs(pjoin(result_dir, 'clip_vis', exp_name), exist_ok=True)
+    os.makedirs(pjoin(result_dir, f'openseg_{exp_name}'), exist_ok=True)
+
+    
+    if encoder == 'clip':
+        # clip_dim = 512 # for ViT-B/32
+        clip_dim = 768 # for ViT-L/14
+        clip_model, prep_clip = create_feature_extractor('ViT-L/14', device=DEVICE)
+
+        text_inputs = clip.tokenize(text_cands).to(DEVICE)
+        with torch.no_grad():
+            text_feats = clip_model.encode_text(text_inputs)
+
+    elif encoder == 'siglip':
+        # siglip_model_name = "google/siglip2-base-patch16-224"
+        siglip_model_name = "google/siglip2-so400m-patch14-384"
+        siglip_model_path = '/scratch/zdeng/checkpoints/models--google--siglip2-so400m-patch14-384/snapshots/e8e487298228002f3d8a82e0cd5c8ea9c567f57f/'
+        siglip_model = AutoModel.from_pretrained(siglip_model_path).to(DEVICE)
+        tokenizer = AutoTokenizer.from_pretrained(siglip_model_path)
+        processor = AutoProcessor.from_pretrained(siglip_model_path, use_fast=True)
+
+        text_inputs = tokenizer(text_cands, 
+            padding="max_length", max_length=64, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            text_feats = siglip_model.get_text_features(**text_inputs)
+        
     text_feats = text_feats.detach().cpu().to(torch.float32).numpy()
 
 
@@ -219,14 +221,14 @@ def main():
                     y1, y2 = j * patch_size[1], (j+1) * patch_size[1]
                     cropped_rgb = rgb[y1:y2, x1:x2]
 
-                    # with torch.no_grad():
-                    #     image_feat_patch = clip_model.encode_image(
-                    #         prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE))
-                        
-                    img_inputs = processor(images=Image.fromarray(cropped_rgb), 
-                                            return_tensors="pt").to(DEVICE)
                     with torch.no_grad():
-                        image_feat_patch = siglip_model.get_image_features(**img_inputs)
+                        if encoder == 'clip':
+                            image_feat_patch = clip_model.encode_image(
+                                prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE))
+                        elif encoder == 'siglip':
+                            img_inputs = processor(images=Image.fromarray(cropped_rgb), 
+                                return_tensors="pt").to(DEVICE)
+                            image_feat_patch = siglip_model.get_image_features(**img_inputs)
 
                     image_feat_patch = image_feat_patch.detach().cpu().to(torch.float32).numpy()
 
@@ -242,16 +244,22 @@ def main():
                 bbox_seg = ann['bbox'] # XYWH format
                 x1, x2 = int(bbox_seg[0]), int(bbox_seg[0]+bbox_seg[2])
                 y1, y2 = int(bbox_seg[1]), int(bbox_seg[1]+bbox_seg[3])
-                cropped_rgb = rgb[y1:y2, x1:x2]
+                
+                # mask out not relevant area
+                mask_area = ann['segmentation']
+                valid_mask = (mask_area > 0)
+                cropped_rgb = copy.deepcopy(rgb)
+                cropped_rgb[~valid_mask] = np.array([255, 255, 255]) # set to white
+                cropped_rgb = Image.fromarray(cropped_rgb[y1:y2, x1:x2])
 
-                # cropped_rgb = prep_clip(Image.fromarray(cropped_rgb)).unsqueeze(0).to(DEVICE)
-                # with torch.no_grad():
-                #     image_feat = clip_model.encode_image(cropped_rgb)
-
-                img_inputs = processor(images=Image.fromarray(cropped_rgb), 
-                                       return_tensors="pt").to(DEVICE)
                 with torch.no_grad():
-                    image_feat = siglip_model.get_image_features(**img_inputs)
+                    if encoder == 'clip':
+                        cropped_rgb = prep_clip(cropped_rgb).unsqueeze(0).to(DEVICE)
+                        image_feat = clip_model.encode_image(cropped_rgb)
+                    elif encoder == 'siglip':
+                        img_inputs = processor(images=cropped_rgb, 
+                            return_tensors="pt").to(DEVICE)
+                        image_feat = siglip_model.get_image_features(**img_inputs)
                 
                 image_feat = image_feat.detach().cpu().to(torch.float32).numpy()
                 img_feats.append(image_feat)
@@ -341,9 +349,15 @@ def main():
                     seg_iter += 1
                     patch_dict[(i, j)]['text_idx'] = top3_idx[-1]
 
-                    ax.text(x1, y1*2/3 + y2/3, f'{text_cands[top3_idx[-1]]}:{top3_score[-1]:.2f}', fontsize=9, color='white')
-                    ax.text(x1, y1/3 + y2*2/3, f'{text_cands[top3_idx[-2]]}:{top3_score[-2]:.2f}', fontsize=9, color='white')
-                    ax.text(x1, y2, f'{text_cands[top3_idx[-3]]}:{top3_score[-3]:.2f}', fontsize=9, color='white')
+                    ax.text(x1, y1*2/3 + y2/3, 
+                        f'{text_cands[top3_idx[-1]]}:{top3_score[-1]:.2f}', 
+                        fontsize=9, color='white')
+                    ax.text(x1, y1/3 + y2*2/3, 
+                        f'{text_cands[top3_idx[-2]]}:{top3_score[-2]:.2f}', 
+                        fontsize=9, color='white')
+                    ax.text(x1, y2, 
+                        f'{text_cands[top3_idx[-3]]}:{top3_score[-3]:.2f}', 
+                        fontsize=9, color='white')
 
 
         seg_dict = {}
