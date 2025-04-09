@@ -10,7 +10,6 @@ import matplotlib.pyplot as plt
 
 # external libs
 # segmentation
-from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 # image embedding
 import clip
@@ -35,43 +34,6 @@ if DEVICE == 'cuda':
         torch.backends.cudnn.allow_tf32 = True
 
 
-def create_segmentor(
-        model_name='sam2.1_hiera_large.pt', 
-        cfg_name='sam2.1_hiera_l.yaml', 
-        points_per_side=32, 
-        min_area=150, 
-        ):
-    logging.info("Loading the segmentation model...")
-    # The path is relative to the sam2 package
-    model_cfg = f"configs/sam2.1/{cfg_name}"
-    # This path is related to this code's location
-    sam2_checkpoint = f"/home/zdeng/sam2/checkpoints/{model_name}"
-    sam2 = build_sam2(
-        model_cfg, sam2_checkpoint, 
-        device=DEVICE, apply_postprocessing=True
-    )
-    """
-    Control how densely points are sampled and what the thresholds are for removing low quality or duplicate masks. 
-    Generation can be automatically run on crops of the image 
-    to get improved performance on smaller objects, and post-processing can remove stray pixels and holes.
-    """
-    mask_generator = SAM2AutomaticMaskGenerator(
-        model=sam2,
-        points_per_side=points_per_side,
-        points_per_batch=256,
-        pred_iou_thresh=0.8,
-        stability_score_thresh=0.9,
-        stability_score_offset=0.7,
-        crop_n_layers=1,
-        box_nms_thresh=0.7,
-        crop_n_points_downscale_factor=2,
-        min_mask_region_area=min_area,
-        use_m2m=True,
-    )
-    return mask_generator
-
-
-
 # srun --time=0:5:00 -n 1 --mem-per-cpu=4g --gpus=1 --gres=gpumem:10g --pty bash
 # module load stack/2024-06 && module load gcc/12.2.0 python/3.10.13 cuda/12.1.1 cudnn/8.9.7.29-12 cmake/3.27.7 eth_proxy
 # source sam-env/bin/activate && cd Openset_Panoptic_Segment
@@ -82,7 +44,7 @@ def create_segmentor(
 
 def main():
     np.random.seed(3)
-    print(f"using device: {DEVICE}")
+    print(f"======== using device: {DEVICE} ========")
 
     seq_name = 'scene0001_00'
     data_dir = '/scratch/zdeng/datasets/scannet'
@@ -96,7 +58,7 @@ def main():
     file_names = sorted(file_names, key=lambda x: int(x.split('.')[0]))
     num_frame = len(file_names)
     step = 5
-    num_frame = 30 * step
+    num_frame = 40 * step
 
     text_cands = [
         'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
@@ -109,31 +71,31 @@ def main():
     ]
 
     
-    patch_num = (4, 4) # num_W, num_H
-    division_method = 'seg' # 'patch' or 'seg'
+    patch_num = (8, 6) # num_W, num_H
+    division_method = 'patch' # 'patch' or 'seg'
     sim_metric = 'cos'
-    encoder = 'clip' # 'clip' or 'siglip'
+    encoder = 'siglip' # 'clip' or 'siglip'
 
-    exp_name = f'seg_{encoder}'
+    exp_name = f'patch8-6_{encoder}'
     result_dir = pjoin('results', seq_name)
-    os.makedirs(pjoin(result_dir, 'sam_vis'), exist_ok=True)
     os.makedirs(pjoin(result_dir, 'sam_temp_res'), exist_ok=True)
     os.makedirs(pjoin(result_dir, 'clip_vis', exp_name), exist_ok=True)
     os.makedirs(pjoin(result_dir, f'openseg_{exp_name}'), exist_ok=True)
 
     
     if encoder == 'clip':
-        # clip_dim = 512 # for ViT-B/32
-        clip_dim = 768 # for ViT-L/14
-        clip_model, prep_clip = create_feature_extractor('ViT-L/14', device=DEVICE)
+        # feat_dim = 512 # for ViT-B/32
+        feat_dim = 768 # for ViT-L/14
+        clip_model, prep_clip = create_clip_extractor('ViT-L/14', device=DEVICE)
 
-        text_inputs = clip.tokenize(text_cands).to(DEVICE)
+        text_inputs = clip.tokenize(text_cands, context_length=77).to(DEVICE)
         with torch.no_grad():
             text_feats = clip_model.encode_text(text_inputs)
 
     elif encoder == 'siglip':
+        feat_dim = 1152 # for siglip2-so400m-patch14-384
         # siglip_model_name = "google/siglip2-base-patch16-224"
-        siglip_model_name = "google/siglip2-so400m-patch14-384"
+        # siglip_model_name = "google/siglip2-so400m-patch14-384"
         siglip_model_path = '/scratch/zdeng/checkpoints/models--google--siglip2-so400m-patch14-384/snapshots/e8e487298228002f3d8a82e0cd5c8ea9c567f57f/'
         siglip_model = AutoModel.from_pretrained(siglip_model_path).to(DEVICE)
         tokenizer = AutoTokenizer.from_pretrained(siglip_model_path)
@@ -153,13 +115,11 @@ def main():
 
     # NOTE parameters
     load_from_pkl = True
-    sam_samples = 32
-    min_area = (H*W) * 0.0005
-
     # create segmentor
     if not load_from_pkl:
-        segmentor:SAM2AutomaticMaskGenerator = create_segmentor(
-            points_per_side=sam_samples
+        segmentor:SAM2AutomaticMaskGenerator = create_sam_segmentor(
+            points_per_side=32, min_area=(H*W) * 0.0005, 
+            iou_thres=0.75, post_process=True, device=DEVICE
         )
 
     # collect all features for later clustering
@@ -177,7 +137,7 @@ def main():
         # ========================= SAM =========================
         if load_from_pkl:
             with open(pjoin(result_dir, 'sam_temp_res', 
-                f'{f_idx}_mask_32samples.pkl'), "rb") as f:
+                f'{f_idx}_post.pkl'), "rb") as f:
                 mask_dict = pickle.load(f)
         else:
             with torch.no_grad():
@@ -190,27 +150,18 @@ def main():
 
             # store it into files
             with open(pjoin(result_dir, 'sam_temp_res', 
-                f'{f_idx}_mask_{sam_samples}samples_post.pkl'), "wb") as f:
+                f'{f_idx}_post.pkl'), "wb") as f:
                 pickle.dump(mask_dict, f)
 
             # show_anns(mask_dict, rgb, f"{result_dir}/sam_vis/{idx}_{num_sam_samples}samples_post.png")
 
         # logging.info(f"Total candidates: {len(mask_dict)}")
-        # =======================================================
 
 
 
+        # ============================ Feature Embedding ============================
         patch_dict = {}
         img_feats = []
-        # ========================= CLIP =========================
-        # ##### method 1 global context
-        # with torch.no_grad():
-        #     image_feat_global = clip_model.encode_image(
-        #         prep_clip(Image.fromarray(rgb)).unsqueeze(0).to(DEVICE))
-        # # print("CLIP feat dim: ", image_feat_global.shape)
-        # image_feat_global = image_feat_global.detach().cpu().to(torch.float32).numpy()
-
-
         # ##### method 2 patch context
         if division_method == 'patch':
             # divide the rgb into N*M equal parts
@@ -248,17 +199,18 @@ def main():
                 # mask out not relevant area
                 mask_area = ann['segmentation']
                 valid_mask = (mask_area > 0)
-                cropped_rgb = copy.deepcopy(rgb)
-                cropped_rgb[~valid_mask] = np.array([255, 255, 255]) # set to white
-                cropped_rgb = Image.fromarray(cropped_rgb[y1:y2, x1:x2])
+                img_roi = copy.deepcopy(rgb)
+                img_roi[~valid_mask] = np.array([255, 255, 255]) # set to white
+                img_roi = Image.fromarray(img_roi[y1:y2, x1:x2])
 
-                with torch.no_grad():
-                    if encoder == 'clip':
-                        cropped_rgb = prep_clip(cropped_rgb).unsqueeze(0).to(DEVICE)
-                        image_feat = clip_model.encode_image(cropped_rgb)
-                    elif encoder == 'siglip':
-                        img_inputs = processor(images=cropped_rgb, 
-                            return_tensors="pt").to(DEVICE)
+                if encoder == 'clip':
+                    img_roi = prep_clip(img_roi).unsqueeze(0).to(DEVICE)
+                    with torch.no_grad():
+                        image_feat = clip_model.encode_image(img_roi)
+                elif encoder == 'siglip':
+                    img_inputs = processor(images=img_roi, 
+                        return_tensors="pt").to(DEVICE)
+                    with torch.no_grad():
                         image_feat = siglip_model.get_image_features(**img_inputs)
                 
                 image_feat = image_feat.detach().cpu().to(torch.float32).numpy()
@@ -275,18 +227,11 @@ def main():
 
 
 
-
-
-
     # find the closest text word for each patch 
     # based on the cosine similarity
     all_feats = np.concatenate(all_feats, axis=0)
     feat_dim = all_feats.shape[-1]
     all_feats = all_feats.reshape(-1, feat_dim)
-
-    # if use L1 sim, we must normalize the text feats first
-    if sim_metric == 'L1':
-        text_feats = text_feats / np.linalg.norm(text_feats, axis=1, keepdims=True)
     
     batch_size = 128
     iters = all_feats.shape[0] // batch_size + 1
@@ -296,10 +241,7 @@ def main():
         start = i * batch_size
         end = start+batch_size
         
-        if sim_metric == 'L1':
-            sim_score = L1_sim(all_feats[start:end], text_feats)
-        elif sim_metric == 'cos':
-            sim_score = cos_sim(all_feats[start:end], text_feats)
+        sim_score = cos_sim(all_feats[start:end], text_feats)
 
         # get top-3 idx and the scores
         # sort in descending order
@@ -310,9 +252,6 @@ def main():
         all_matches.append(top3_idx)
         all_scores.append(top3_score)
 
-    
-
-
     all_matches = np.concatenate(all_matches, axis=0)
     all_scores = np.concatenate(all_scores, axis=0)
     seg_iter = 0
@@ -320,7 +259,7 @@ def main():
     # collect the results and pack
     for iter, f_idx in tqdm(enumerate(range(0, num_frame, step))):
 
-        with open(f"{result_dir}/sam_temp_res/{f_idx}_mask_32samples.pkl", "rb") as f:
+        with open(f"{result_dir}/sam_temp_res/{f_idx}_post.pkl", "rb") as f:
             mask_dict = pickle.load(f)
 
         rgb_file = pjoin(rgb_path, file_names[f_idx])
@@ -376,10 +315,6 @@ def main():
             inst_info['area'] = np.count_nonzero(mask_area)
             seg_map[mask_area] = inst_id + 1
             inst_info['score_iou'] = ann['predicted_iou']
-            
-
-            # ##### global context, just assign to all segs
-            # inst_info['sem_feat'] = image_feat_global
 
             # ##### patch context, find the patch with largest overlap
             if division_method == 'patch':
@@ -416,10 +351,12 @@ def main():
 
         seg_dict['seg_map'] = seg_map
         seg_dict['meta_info'] = seg_meta_info
-        # save_pkl_path = pjoin(result_dir, 
-        #     f'open_seg_{exp_name}', str(f_idx).zfill(5)+'.pkl')
-        # with open(save_pkl_path, "wb") as f:
-        #     pickle.dump(seg_dict, f)
+
+        # ### save the segmentation results
+        save_pkl_path = pjoin(result_dir, f'openseg_{exp_name}', 
+             str(f_idx).zfill(5)+'.pkl')
+        with open(save_pkl_path, "wb") as f:
+            pickle.dump(seg_dict, f)
 
     
     

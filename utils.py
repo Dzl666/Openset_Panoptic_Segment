@@ -12,13 +12,19 @@ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 # feature embedder
 import clip
 
-def create_feature_extractor(model_name='ViT-B/32', device='cuda'):
+def create_clip_extractor(model_name='ViT-B/32', device='cuda'):
     """
     - model_name: choose from ['RN50', 'RN101', 'RN50x4', 'RN50x16', 'RN50x64', 
         'ViT-B/32', 'ViT-B/16', 'ViT-L/14', 'ViT-L/14@336px']
     """
     logging.info("Loading the CLIP model...")
-    model, preprocess = clip.load(model_name, device=device)
+    if model_name == 'ViT-B/32':
+        model_path = '/scratch/zdeng/checkpoints/clip/ViT-B-32.pt'
+    elif model_name == 'ViT-L/14':
+        model_path = '/scratch/zdeng/checkpoints/clip/ViT-L-14.pt'
+    else:
+        raise ValueError(f"Unsupported CLIP model name: {model_name}")
+    model, preprocess = clip.load(model_path, device=device)
 
     return model, preprocess
 
@@ -44,7 +50,7 @@ def create_sam_segmentor(
     # The path is relative to the sam2 package
     model_cfg = f"configs/sam2.1/{cfg_name}"
     # This path is related to this code's location
-    sam2_checkpoint = f"/home/zdeng/sam2/checkpoints/{model_name}"
+    sam2_checkpoint = f"/scratch/zdeng/checkpoints/{model_name}"
     sam2 = build_sam2(
         model_cfg, sam2_checkpoint,
         device=device, apply_postprocessing=post_process
