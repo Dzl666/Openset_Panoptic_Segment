@@ -19,11 +19,16 @@ from transformers import AutoProcessor, AutoModel, AutoTokenizer
 # self packages
 from utils import *
 
+# 
+
+# cabinet,bed,chair,truck,sofa,table,door,window,bookshelf,picture,desk,curtain,pillow,nightstand,toilet,sink,lamp,wall,floor,blinds,shelves,dresser,mirror,floor mat,clothes,ceiling,books,paper,towel,box,whiteboard,chair_leg,table_leg,chair_arm,sofa_arm,sofa_back
+
+
 
 FORMAT = '%(asctime)s.%(msecs)06d %(levelname)-8s: [%(filename)s] %(message)s'
 logging.basicConfig(level=logging.INFO, format=FORMAT, datefmt='%H:%M:%S')
 
-torch.cuda.set_device(7)
+torch.cuda.set_device(6)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 if DEVICE == 'cuda':
     # use bfloat16
@@ -58,7 +63,7 @@ def main():
     file_names = sorted(file_names, key=lambda x: int(x.split('.')[0]))
     num_frame = len(file_names)
     step = 5
-    num_frame = 40 * step
+    num_frame = 160 * step
 
     text_cands = [
         'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door', 
@@ -69,14 +74,15 @@ def main():
         'box', 'whiteboard',
         'chair_leg', 'table_leg', 'chair_arm', 'sofa_arm', 'sofa_back', 
     ]
+    pallete = get_new_pallete(len(text_cands))
 
     
-    patch_num = (8, 6) # num_W, num_H
-    division_method = 'patch' # 'patch' or 'seg'
+    patch_num = (6, 4) # num_W, num_H | (8, 6) or (6, 4)
+    division_method = 'seg' # 'patch' or 'seg'
     sim_metric = 'cos'
     encoder = 'siglip' # 'clip' or 'siglip'
 
-    exp_name = f'patch8-6_{encoder}'
+    exp_name = f'seg_{encoder}'
     result_dir = pjoin('results', seq_name)
     os.makedirs(pjoin(result_dir, 'sam_temp_res'), exist_ok=True)
     os.makedirs(pjoin(result_dir, 'clip_vis', exp_name), exist_ok=True)
@@ -114,7 +120,7 @@ def main():
     H, W, _ = rgb.shape
 
     # NOTE parameters
-    load_from_pkl = True
+    load_from_pkl = False
     # create segmentor
     if not load_from_pkl:
         segmentor:SAM2AutomaticMaskGenerator = create_sam_segmentor(
@@ -312,8 +318,9 @@ def main():
             inst_info['bbox'] = [x1, y1, x2, y2]
             
             mask_area = ann['segmentation']
-            inst_info['area'] = np.count_nonzero(mask_area)
             seg_map[mask_area] = inst_id + 1
+
+            inst_info['area'] = np.count_nonzero(mask_area)
             inst_info['score_iou'] = ann['predicted_iou']
 
             # ##### patch context, find the patch with largest overlap
@@ -335,7 +342,7 @@ def main():
                 text_idx = all_matches[seg_iter][-1]
                 best_score = all_scores[seg_iter][-1]
                 seg_iter += 1
-                color_mask[mask_area] = np.concatenate([np.random.random(3), [0.5]])
+                color_mask[mask_area] = np.concatenate([pallete[text_idx].detach().cpu().numpy(), [0.5]])
                 ax.text((x1+x2)/2, (y1+y2)/2, f'{text_cands[text_idx]}', fontsize=10, color='white')
 
 
@@ -352,7 +359,7 @@ def main():
         seg_dict['seg_map'] = seg_map
         seg_dict['meta_info'] = seg_meta_info
 
-        # ### save the segmentation results
+        ### save the segmentation results
         save_pkl_path = pjoin(result_dir, f'openseg_{exp_name}', 
              str(f_idx).zfill(5)+'.pkl')
         with open(save_pkl_path, "wb") as f:
