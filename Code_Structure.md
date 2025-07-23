@@ -1,54 +1,76 @@
-# Literature reviews
-    ## OpenGS-SLAM
-        ### check how opengs-slam combine the results from YOLO-World and SAM
-        ### 
-    ## VSC 3D Pano Mapping
-        ### Get panoptic seg from Mask2Former
-        ### Get depth seg from one component of Voxblox++
-        ### refine the seg from depth and pack all segs
-        ### run the main mapping and merging pipeline
-    ## Search for recent depth segmentation methods
-        ### 
-    ##
 
-# Pipelines
-    ## use SAM / something to do segmentation 
-    ## get encoded features for each of the segmented area
-        ### simple test - convert the NYU40 labels into one-hot encoding
-        ### merge ?
-        ### split ?
+```python
+def processSegment()
 
+for each seg
+    computeSegmentLabelCandidates()
 
-    ## Look-up table
-        ### for each input 
+    for each point
+        getBlockPtr() & getVoxelPtr()
+            Find the corres. voxel given the current point position
+        getNextUnassignedLabel()
+            Get the glo-label of the current voxel, if it has not beed assigned to other segments,
+            Otherwise, find unassigned other candidate labels with highest conf in the voxel
+        increaseLabelCountForSegment()
+            check if the given label has been listed in the candidate list
+            - if in, increase the overlap count for this pair of <label, segment>
+            checkForSegmentLabelMergeCandidate() 
+                check if the overlapping is enough, add this pair to merge list if enough
+            - if not (this glo-label is unseen), then add it to the candidate list
 
-    ### which method os better ? 
-    # compare with the stored semantic feature in the current voxel and group them based on those limited options
-    # compare with all existing semi-open-set labels in the look-up table and assign the corres sem-label (O())
+    obtain all the possible glo-label candidates from the cache
 
-# integrateFrame (gsm_py.cpp)
-    # for each seg -> computeSegmentLabelCandidates ()
-        # getBlockPtr & getVoxelPtr
-        # getNextUnassignedLabel
-        # increaseLabelConfidenceForSegment or increaseLabelCountForSegment
-        # if not label got -> getFreshLabel
-        # insert the new segment to the candidate map
-    # decideLabelPointClouds
-        # while -> getNextSegmentLabelPairWithConfidence
-            # collect segments
-        # for each seg_merge_cand -> increasePairwiseConfidenceCount
-            # assign all unlabeled segs a new label
+    if none glo-label observed, then find this segment a new glo-label
 
-    # for each seg -> integratePointCloud 
-        # bundleRays (integrate all points projected into the same voxel)
-        # integrateRays (update TSDF)
-            # integrateVoxels (multi-processing)
-                # average all points and do ray casting
-            # updateLayerWithStoredBlocks
-            # updateLabelLayerWithStoredBlocks
-        # integrateRays with clear_ray set to true
+def integrateFrame()
 
-    # mergeLabel
-        # updatePairwiseConfidenceAfter
+decideLabelPointClouds()
+    while -> getNextSegmentLabelPair()
+        iterate all labels, find the segment with max overlapping count
+        pair these two <max_label, max_seg>, assign this label if unassigned to other segment
 
-    # getLabelsToPublish
+        for all seen segments fulfill the conditions in the searching
+            first remove it from all labels from label_to_seg_cands
+
+            computeSegmentLabelCandidates() recompute the candidate labels for this segment
+        
+        return the pair
+
+        insert the pair to candidate pairs list
+    
+    for all segments
+        increasePairwiseConfidenceCount(), increase the label-to-label conf. for all label candidates under each segment
+
+    set new label for all remaining segments without a assigned glo-label
+
+    # ====== instance segmentation in Voxblox++=====
+    for each new segment
+        check if the local-inst-id has mapped to a glo-inst-id
+
+        - if yes, increase the label_to_inst count
+        - if no, getInstanceLabel()
+            find the glo-inst linked to this segment with highest count
+            - if inst-id ==0, create a new glo-inst
+            - else increase the label_to_inst count with the found glo-inst-id
+                NOTE here we also want to make sure we only pair one segment to each glo-inst
+
+        increase the class count of this label using the 2D semantic
+
+    # ====== instance segmentation in VSC (Yang et. al.)=====
+    for each new segment
+        find all other segment with unassigned label and with same instance id and semantic id
+
+        calculate the inner, external confidence for all seleceted segs and put into a SegGraph
+
+        insertInstanceToSegGraph()
+            
+
+insert()
+    for each seg integratePointCloud() 
+        bundleRays(), integrate all points projected into the same voxel
+        integrateRays(), update TSDF
+            integrateVoxels(), average all points and do ray casting
+            updateLayerWithStoredBlocks()
+            updateLabelLayerWithStoredBlocks()
+        integrateRays with clear_ray set to true
+```

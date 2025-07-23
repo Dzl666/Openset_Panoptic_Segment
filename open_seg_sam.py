@@ -60,6 +60,9 @@ def cluster_with_dbscan(similarity_matrix, instance_ids, eps=0.3, min_samples=2)
             groups[label].append(inst_id)
     return list(groups.values())
 
+
+
+
 def main():
     np.random.seed(3)
 
@@ -89,10 +92,9 @@ def main():
     pallete = get_new_pallete(len(text_cands))
 
     
-    patch_num = (6, 4) # num_W, num_H | (8, 6) or (6, 4)
     division_method = 'seg' # 'patch' or 'seg'
     sim_metric = 'cos'
-    encoder = 'siglip' # 'clip' or 'siglip'
+    encoder = 'clip' # 'clip' or 'siglip'
 
     exp_name = f'seg_{encoder}_merge'
     result_dir = pjoin('results', seq_name)
@@ -102,9 +104,9 @@ def main():
 
     
     if encoder == 'clip':
-        # feat_dim = 512 # for ViT-B/32
-        feat_dim = 768 # for ViT-L/14
-        clip_model, prep_clip = create_clip_extractor('ViT-L/14', device=DEVICE)
+        feat_dim = 512 # for ViT-B/32
+        # feat_dim = 768 # for ViT-L/14
+        clip_model, prep_clip = create_clip_extractor('ViT-B/32', device=DEVICE)
 
         text_inputs = clip.tokenize(text_cands, context_length=77).to(DEVICE)
         with torch.no_grad():
@@ -194,14 +196,13 @@ def main():
             img_roi[~valid_mask] = np.array([255, 255, 255]) # set to white
             img_roi = Image.fromarray(img_roi[y1:y2, x1:x2])
 
-            if encoder == 'clip':
-                img_roi = prep_clip(img_roi).unsqueeze(0).to(DEVICE)
-                with torch.no_grad():
+            with torch.no_grad():
+                if encoder == 'clip':
+                    img_roi = prep_clip(img_roi).unsqueeze(0).to(DEVICE)
                     image_feat = clip_model.encode_image(img_roi)
-            elif encoder == 'siglip':
-                img_inputs = processor(images=img_roi, 
-                    return_tensors="pt").to(DEVICE)
-                with torch.no_grad():
+                elif encoder == 'siglip':
+                    img_inputs = processor(images=img_roi, 
+                        return_tensors="pt").to(DEVICE)
                     image_feat = siglip_model.get_image_features(**img_inputs)
             
             img_feats.append(image_feat)

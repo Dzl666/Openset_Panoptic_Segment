@@ -45,7 +45,6 @@ if DEVICE == 'cuda':
 
 # sbatch --time=0:5:00 -n 2 --mem-per-cpu=4g --gpus=1 --gres=gpumem:16g --output="logs/running.log" --wrap="python open_pano_seg.py"
 
-# ./rclone copy ../Openset_Panoptic_Segment/results/scene0001_00/open_set_results/ g-drive:
 
 def main():
     np.random.seed(3)
@@ -80,7 +79,7 @@ def main():
     patch_num = (6, 4) # num_W, num_H | (8, 6) or (6, 4)
     division_method = 'seg' # 'patch' or 'seg'
     sim_metric = 'cos'
-    encoder = 'siglip' # 'clip' or 'siglip'
+    encoder = 'clip' # 'clip' or 'siglip'
 
     exp_name = f'seg_{encoder}'
     result_dir = pjoin('results', seq_name)
@@ -90,9 +89,9 @@ def main():
 
     
     if encoder == 'clip':
-        # feat_dim = 512 # for ViT-B/32
-        feat_dim = 768 # for ViT-L/14
-        clip_model, prep_clip = create_clip_extractor('ViT-L/14', device=DEVICE)
+        feat_dim = 512 # for ViT-B/32
+        # feat_dim = 768 # for ViT-L/14
+        clip_model, prep_clip = create_clip_extractor('ViT-B/32', device=DEVICE)
 
         text_inputs = clip.tokenize(text_cands, context_length=77).to(DEVICE)
         with torch.no_grad():
@@ -120,7 +119,7 @@ def main():
     H, W, _ = rgb.shape
 
     # NOTE parameters
-    load_from_pkl = False
+    load_from_pkl = True
     # create segmentor
     if not load_from_pkl:
         segmentor:SAM2AutomaticMaskGenerator = create_sam_segmentor(
@@ -209,14 +208,13 @@ def main():
                 img_roi[~valid_mask] = np.array([255, 255, 255]) # set to white
                 img_roi = Image.fromarray(img_roi[y1:y2, x1:x2])
 
-                if encoder == 'clip':
-                    img_roi = prep_clip(img_roi).unsqueeze(0).to(DEVICE)
-                    with torch.no_grad():
+                with torch.no_grad():
+                    if encoder == 'clip':
+                        img_roi = prep_clip(img_roi).unsqueeze(0).to(DEVICE)
                         image_feat = clip_model.encode_image(img_roi)
-                elif encoder == 'siglip':
-                    img_inputs = processor(images=img_roi, 
-                        return_tensors="pt").to(DEVICE)
-                    with torch.no_grad():
+                    elif encoder == 'siglip':
+                        img_inputs = processor(images=img_roi, 
+                            return_tensors="pt").to(DEVICE)
                         image_feat = siglip_model.get_image_features(**img_inputs)
                 
                 image_feat = image_feat.detach().cpu().to(torch.float32).numpy()
@@ -320,8 +318,8 @@ def main():
             mask_area = ann['segmentation']
             seg_map[mask_area] = inst_id + 1
 
-            inst_info['area'] = np.count_nonzero(mask_area)
-            inst_info['score_iou'] = ann['predicted_iou']
+            # inst_info['area'] = np.count_nonzero(mask_area)
+            # inst_info['score_iou'] = ann['predicted_iou']
 
             # ##### patch context, find the patch with largest overlap
             if division_method == 'patch':
@@ -353,7 +351,7 @@ def main():
         ax.imshow(color_mask)
         ax = fig.add_subplot(122)
         ax.imshow(rgb)
-        plt.savefig(f"{result_dir}/clip_vis/{exp_name}/{f_idx}.png")
+        # plt.savefig(f"{result_dir}/clip_vis/{exp_name}/{f_idx}.png")
         plt.close()
 
         seg_dict['seg_map'] = seg_map

@@ -39,7 +39,7 @@ pallete = get_new_pallete(len(text_cands))
 def main():
     torch.autograd.set_grad_enabled(False)
 
-    seq_name = 'scene0001_00'
+    seq_name = 'scene0000_00'
     data_dir = '/scratch/zdeng/datasets/scannet'
     # data_dir = '/cluster/scratch/dengzi/scannet'
     # image is 1296 * 968
@@ -55,9 +55,9 @@ def main():
     step = 5
     num_frame = 40 * step
 
-    load_from_pkl = True
+    load_from_pkl = False
     encoder = 'siglip' # 'clip' or 'siglip'
-    fuse_method = 'glo-seg' # 'glo-seg' or 'patch-seg'
+    fuse_method = 'patch-seg' # 'glo-seg' or 'patch-seg'
 
 
     exp_name = f'{fuse_method}_{encoder}'
@@ -91,6 +91,13 @@ def main():
             text_feats = siglip_model.get_text_features(**text_inputs)
         
     # text_feats = text_feats.detach().cpu().to(torch.float32).numpy()
+    # text_dict = {}
+    # for i, text in enumerate(text_cands):
+    #     text_dict[text] = text_feats[i]
+    # save_pkl_path = pjoin(result_dir, 'siglip2_text_embed.pkl')
+    # with open(save_pkl_path, "wb") as f:
+    #     pickle.dump(text_dict, f)
+
 
     if not load_from_pkl:
         segmentor = create_sam_segmentor(
@@ -312,7 +319,7 @@ def main():
             inst_info['score_iou'] = mask_i['predicted_iou']
             inst_info['area'] = len(roi_inds[m_id])
 
-            inst_info['sem_feat'] = feat_map[m_id]
+            inst_info['sem_feat'] = feat_map[m_id].detach().cpu().numpy() 
             match_text = text_cands[best_match_seg]
             inst_info['text_idx'] = match_text
             seg_meta_info[m_id+1] = inst_info

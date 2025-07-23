@@ -29,10 +29,8 @@ text_cands = [
     'cabinet', 'bed', 'chair', 'truck', 'sofa', 'table', 'door',
     'window', 'bookshelf', 'picture', 'desk', 'curtain', 'pillow',  
     'nightstand', 'toilet', 'sink', 'lamp',
-    'wall', 'floor', 'blinds', 'shelves', 'mirror',
-    'floor mat', 'clothes', 'ceiling', 'books', 'paper', 'towel',
-    'box', 'whiteboard',
-    'chair_leg', 'sofa_arm', 'sofa_back', 'table_leg', 'chair_arm',
+    'wall', 'floor', 'blinds', 'shelves', 'mirror', 'clothes', 'ceiling', 'books', 'paper', 'towel',
+    'box', 'whiteboard'
 ]
 pallete = get_new_pallete(len(text_cands))
 
@@ -90,39 +88,27 @@ def main():
     os.makedirs(pjoin(result_dir, 'sp_vis', exp_name), exist_ok=True)
     os.makedirs(pjoin(result_dir, 'openseg_sp'), exist_ok=True)
 
-
-
-    if encoder == 'clip':
-        # feat_dim = 512 # for ViT-B/32
-        feat_dim = 768 # for ViT-L/14
-        clip_model, prep_clip = create_clip_extractor('ViT-L/14', device=DEVICE)
-        text_inputs = clip.tokenize(text_cands, context_length=77).to(DEVICE)
-        with torch.no_grad():
-            text_feats = clip_model.encode_text(text_inputs)
-    elif encoder == 'siglip':
-        feat_dim = 1152
-        # siglip_model_name = "google/siglip2-base-patch16-224"
-        siglip_model_path = '/scratch/zdeng/checkpoints/models--google--siglip2-so400m-patch14-384/snapshots/e8e487298228002f3d8a82e0cd5c8ea9c567f57f/'
-        siglip_model = AutoModel.from_pretrained(siglip_model_path).to(DEVICE)
-        tokenizer = AutoTokenizer.from_pretrained(siglip_model_path)
-        processor = AutoProcessor.from_pretrained(siglip_model_path, use_fast=True)
-
-        text_inputs = tokenizer(text_cands, 
-            padding="max_length", max_length=64, return_tensors="pt").to(DEVICE)
-        with torch.no_grad():
-            text_feats = siglip_model.get_text_features(**text_inputs)
+    # only use clip
+    # feat_dim = 512 # for ViT-B/32
+    feat_dim = 768 # for ViT-L/14
+    clip_model, prep_clip = create_clip_extractor('ViT-L/14', device=DEVICE)
+    text_inputs = clip.tokenize(text_cands, context_length=77).to(DEVICE)
+    with torch.no_grad():
+        text_feats = clip_model.encode_text(text_inputs)
         
     text_feats = text_feats.detach().cpu() #.to(torch.float32).numpy()
 
     cos_sim_func = torch.nn.CosineSimilarity(dim=-1)
 
     # crop the whole image into multiple scale of patches
-    crop_size = [(H, W), (H//2, W//2), (H//4, W//4)]
+    crop_size = [(H, W), (H//2, W//2)] # , (H//4, W//4)
     clip_p_size = 14
     clip_ptk_num = 16
+    vit_size = clip_p_size*clip_ptk_num
     # each patch is 14 x 14 cropped from the 224 x 224 image after downsampling
-    patch_map = np.zeros((clip_p_size*clip_ptk_num, clip_p_size*clip_ptk_num), dtype=np.uint8)
-    for patch_idx in range(clip_ptk_num * clip_ptk_num):
+    patch_map = np.zeros((vit_size, vit_size), dtype=np.uint8)
+    patches_num = clip_ptk_num * clip_ptk_num
+    for patch_idx in range(patches_num):
         _row = (patch_idx // clip_ptk_num)
         _col = patch_idx - _row * clip_ptk_num
         _x = _col * clip_p_size
@@ -138,7 +124,7 @@ def main():
 
         feat_map = np.zeros((H, W, feat_dim), dtype=np.float32)
 
-        for scale_layer in range(1):
+        for scale_layer in range(len(crop_size)):
             crop_h, crop_w = crop_size[scale_layer]
 
             layer_feat_map = np.zeros_like(feat_map, dtype=np.float32)
@@ -149,37 +135,47 @@ def main():
             stride_w = int(crop_w // 2)
             for i in range(0, H - crop_h + 1, stride_h):
                 for j in range(0, W - crop_w + 1, stride_w):
+                    # print(f"Processing {i}, {j} in layer {scale_layer}")
                     # crop the image
                     rgb_patch = rgb[i:i + crop_h, j:j + crop_w, :]
-                    cls_tk, ptks = clip_model.encode_image(prep_clip(Image.fromarray(rgb_patch)).unsqueeze(0).to(DEVICE))
-                    ptks = ptks.squeeze().detach().cpu().numpy()
-                    
 
                     lab_patch = cv2.cvtColor(rgb_patch, cv2.COLOR_RGB2LAB)
-                    slic_segs = segmentation.slic(lab_patch, n_segments=50, compactness=10, sigma=2)
-                    seg_idx, seg_area = np.unique(slic_segs, return_counts=True)
+                    slic_map = segmentation.slic(lab_patch, n_segments=50, compactness=10, sigma=4)
+                    seg_idx, seg_area = np.unique(slic_map, return_counts=True)
 
-                    resize_patch_map = cv2.resize(patch_map, (crop_w, crop_h), interpolation=cv2.INTER_NEAREST)
-                    patch_size = crop_w* crop_h / clip_ptk_num / clip_ptk_num
+                    resize_slic_map = cv2.resize(slic_map, (vit_size, vit_size), interpolation=cv2.INTER_NEAREST)
+                    # assign the patch id to each slic segment
+                    local_to_patch = np.zeros((50, patches_num))
+                    for patch_idx in range(patches_num):
+                        patch_mask = (patch_map == patch_idx)
+                        seg_ids, seg_occ = np.unique(resize_slic_map[patch_mask], return_counts=True)
+                        # find the major id
+                        seg_id = seg_ids[np.argmax(seg_occ)]
+                        local_to_patch[seg_id, patch_idx] = 1
 
+                    clip_model.set_ViT_mask(torch.from_numpy(local_to_patch).to(DEVICE))
+
+                    # CLIP forward
+                    rgb_tensor = prep_clip(Image.fromarray(rgb_patch)).unsqueeze(0).to(DEVICE)
+                    _, local_tk = clip_model.encode_image(rgb_tensor)
+                    local_tk = local_tk.squeeze().detach().cpu().numpy()
+
+                    # fill the slic segs with the local token
                     feat_crop = np.zeros((crop_h, crop_w, feat_dim), dtype=np.float32)
                     # find the idx of patches covered by each slis seg
                     for slic_id in seg_idx:
-                        patch_cover = resize_patch_map[slic_segs == slic_id]
-                        patch_idx, patch_area = np.unique(patch_cover, return_counts=True)
-                        # remove the id with area < 10% of each patch
-                        patch_idx = patch_idx[patch_area > 0.1 * patch_size]
-                        patch_feat = np.mean(ptks[patch_idx], axis=0)
-                        feat_crop[slic_segs == slic_id] = patch_feat
+                        feat_crop[slic_map == slic_id] = local_tk[slic_id]
 
                     layer_feat_map[i:i + crop_h, j:j + crop_w, :] += feat_crop
                     map_cnt[i:i + crop_h, j:j + crop_w] += 1
 
+            # handle the overlapping area by averaging
             map_cnt[map_cnt == 0] = 1
             layer_feat_map /= map_cnt[:, :, np.newaxis].astype(np.float32)
+
             feat_map += layer_feat_map
         
-        # feat_map /= len(crop_size)
+        feat_map /= len(crop_size)
         feat_map = torch.from_numpy(feat_map)
 
         print("Visualizing the segmentation results")

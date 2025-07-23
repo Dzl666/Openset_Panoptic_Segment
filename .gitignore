@@ -1,8 +1,12 @@
 
 checkpoints
+ckpts
 results
 outputs
 logs
 
 *.pyc
 __pycache__
+
+upload
+scannet
